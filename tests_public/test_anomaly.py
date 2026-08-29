@@ -34,3 +34,29 @@ def test_auto_detector_uses_context_segmentation():
     )
     assert result["is_anomaly"] is False
 
+
+def test_auto_detector_handles_full_multiseasonal_series_without_segment():
+    # 28 days: weekdays (M-F) ~600, weekends (Sa-Su) ~250
+    week_pattern = [600, 610, 595, 605, 600, 250, 255]
+    full_history = week_pattern * 4  # 28 days
+    
+    # Legitimate Saturday volume (250)
+    res_normal_sat = detect_metric(252, full_history, method="auto", context={"day_of_week": 5})
+    assert res_normal_sat["is_anomaly"] is False
+
+    # True Saturday drop (50)
+    res_drop_sat = detect_metric(50, full_history, method="auto", context={"day_of_week": 5})
+    assert res_drop_sat["is_anomaly"] is True
+
+
+def test_auto_detector_handles_trend_continuation_vs_break():
+    trending_history = [100, 120, 140, 160, 180, 200, 220]
+    # Continuation of trend: 240
+    res_trend_continue = detect_metric(240, trending_history, method="auto", context={"trend": True})
+    assert res_trend_continue["is_anomaly"] is False
+
+    # Broken trend: sudden drop to 50
+    res_trend_break = detect_metric(50, trending_history, method="auto", context={"trend": True})
+    assert res_trend_break["is_anomaly"] is True
+
+

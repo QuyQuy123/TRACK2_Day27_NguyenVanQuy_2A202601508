@@ -76,39 +76,109 @@ def detect_anomaly(
     - 'zscore': Standard Z-Score.
     - 'mad': Robust Modified Z-Score using MAD.
     - 'auto': Automatically selects robust MAD or Z-Score, factoring in context
-              such as same_segment_history, day_of_week, and known_events.
+              such as day_of_week seasonality, same_segment_history, trend, and known_events.
     """
     if method == "zscore":
         return zscore_detector(current, history, threshold=threshold)
     if method == "mad":
         return mad_detector(current, history, threshold=threshold)
     if method == "auto":
-        effective_history = list(history)
-        ctx_desc = []
+        raw_values = np.asarray(list(history), dtype=float)
+        values = raw_values[np.isfinite(raw_values)]
+        if values.size < 3:
+            return {"is_anomaly": False, "score": 0.0, "method": "auto:zscore", "reason": "insufficient_history"}
 
-        if context:
-            if "same_segment_history" in context and len(context["same_segment_history"]) >= 3:
-                effective_history = list(context["same_segment_history"])
-                ctx_desc.append("used_same_segment_history=True")
-            if "day_of_week" in context:
-                ctx_desc.append(f"dow={context['day_of_week']}")
-            if "known_event" in context and context["known_event"]:
-                ctx_desc.append(f"event={context['known_event']}")
-                threshold = threshold * 1.5
-            if "metric_name" in context:
-                ctx_desc.append(f"metric={context['metric_name']}")
+        context = context or {}
+        cur = float(current)
 
-        # Use MAD if we have sufficient samples (>= 5), else fallback to Z-score
-        if len(effective_history) >= 5:
-            res = mad_detector(current, effective_history, threshold=threshold)
+        # 1. Direct segment history passed in context
+        if "same_segment_history" in context and len(context["same_segment_history"]) >= 3:
+            seg_values = np.asarray(list(context["same_segment_history"]), dtype=float)
+            seg_values = seg_values[np.isfinite(seg_values)]
+            if seg_values.size >= 3:
+                res = mad_detector(cur, seg_values, threshold=threshold)
+                res["method"] = "auto:same_segment_mad"
+                res["reason"] += "; used_same_segment_history=True"
+                return res
+
+        # 2. Seasonality / Day-of-week context without pre-extracted segment
+        if "day_of_week" in context and values.size >= 14:
+            dow = context["day_of_week"]
+            if isinstance(dow, str):
+                dow_map = {
+                    "mon": 0, "monday": 0, "tue": 1, "tuesday": 1,
+                    "wed": 2, "wednesday": 2, "thu": 3, "thursday": 3,
+                    "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
+                    "sun": 6, "sunday": 6,
+                }
+                try:
+                    dow = dow_map.get(dow.lower().strip(), int(dow))
+                except (ValueError, AttributeError):
+                    dow = 0
+            else:
+                dow = int(dow)
+
+            phases = [values[p::7] for p in range(7)]
+            medians = [float(np.median(p)) for p in phases if len(p) >= 2]
+
+            if len(medians) == 7:
+                sorted_phase_indices = np.argsort(medians)
+                weekend_phases = sorted_phase_indices[:2]
+                weekday_phases = sorted_phase_indices[2:]
+
+                target_phase_indices = weekend_phases if dow in [5, 6] else weekday_phases
+                target_phases = [phases[idx] for idx in target_phase_indices]
+
+                best_m_score = None
+                best_info = None
+                for p_vals in target_phases:
+                    med = float(np.median(p_vals))
+                    mad = float(np.median(np.abs(p_vals - med)))
+                    scale = mad if mad > 0 else (float(np.mean(np.abs(p_vals - med))) or 1.0)
+                    m_score = 0.6745 * abs(cur - med) / scale
+                    if best_m_score is None or m_score < best_m_score:
+                        best_m_score = m_score
+                        best_info = (med, scale)
+
+                if best_m_score is not None:
+                    med, scale = best_info
+                    eff_thresh = threshold * (2.0 if context.get("known_event") else 1.0)
+                    return {
+                        "is_anomaly": bool(best_m_score > eff_thresh),
+                        "score": float(best_m_score),
+                        "method": "auto:seasonal_mad",
+                        "reason": f"seasonal_dow={dow}, median={med:.3f}, mad={scale:.3f}, threshold={eff_thresh}",
+                    }
+
+        # 3. Trend handling in context or linear detrending
+        if context.get("trend") or (values.size >= 7 and np.abs(np.corrcoef(np.arange(values.size), values)[0, 1]) > 0.85):
+            x = np.arange(values.size)
+            slope, intercept = np.polyfit(x, values, 1)
+            expected = slope * values.size + intercept
+            residuals = values - (slope * x + intercept)
+            res_std = float(np.std(residuals))
+            scale = max(res_std, float(np.mean(np.abs(values))) * 0.05, 1.0)
+            trend_score = abs(cur - expected) / scale
+            eff_thresh = threshold * (2.0 if context.get("known_event") else 1.0)
+            return {
+                "is_anomaly": bool(trend_score > eff_thresh),
+                "score": float(trend_score),
+                "method": "auto:trend",
+                "reason": f"trend_expected={expected:.3f}, scale={scale:.3f}, threshold={eff_thresh}",
+            }
+
+        # 4. Standard robust MAD / Z-score default
+
+        eff_thresh = threshold * (2.0 if context.get("known_event") else 1.0)
+        if values.size >= 5:
+            res = mad_detector(cur, values, threshold=eff_thresh)
             res["method"] = "auto:mad"
         else:
-            res = zscore_detector(current, effective_history, threshold=threshold)
+            res = zscore_detector(cur, values, threshold=eff_thresh)
             res["method"] = "auto:zscore"
 
-        if ctx_desc:
-            res["reason"] += f"; context: [{', '.join(ctx_desc)}]"
         return res
 
     raise ValueError(f"Unsupported method: {method}")
+
 
