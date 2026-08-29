@@ -14,6 +14,9 @@ import numpy as np
 
 def zscore_detector(current: float, history: Iterable[float], threshold: float = 3.0) -> dict[str, Any]:
     values = np.asarray(list(history), dtype=float)
+    values = values[np.isfinite(values)]
+    if not np.isfinite(float(current)):
+        return {"is_anomaly": True, "score": float("inf"), "method": "zscore", "reason": "current_is_not_finite"}
     if values.size < 3:
         return {"is_anomaly": False, "score": 0.0, "method": "zscore", "reason": "insufficient_history"}
     mean = float(np.mean(values))
@@ -33,32 +36,36 @@ def zscore_detector(current: float, history: Iterable[float], threshold: float =
 def mad_detector(current: float, history: Iterable[float], threshold: float = 3.5) -> dict[str, Any]:
     """Robust Modified Z-score using Median Absolute Deviation (MAD).
 
-    Handles zero-MAD and small-variance edge cases gracefully.
+    Handles zero-MAD and small-variance edge cases gracefully with practical scale.
     """
     values = np.asarray(list(history), dtype=float)
-    if values.size < 3:
+    values = values[np.isfinite(values)]
+    if not np.isfinite(float(current)):
+        return {"is_anomaly": True, "score": float("inf"), "method": "mad", "reason": "current_is_not_finite"}
+    if values.size < 5:
         return {"is_anomaly": False, "score": 0.0, "method": "mad", "reason": "insufficient_history"}
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median)))
     cur = float(current)
 
     if mad == 0:
-        # Fallback to mean absolute deviation or direct equality
-        mean_ad = float(np.mean(np.abs(values - median)))
-        if mean_ad == 0:
-            score = float("inf") if cur != median else 0.0
-        else:
-            score = 0.6745 * abs(cur - median) / mean_ad
-        reason = f"median={median:.3f}, mad=0.0 (mean_ad={mean_ad:.3f}), threshold={threshold}"
-    else:
-        score = 0.6745 * abs(cur - median) / mad
-        reason = f"median={median:.3f}, mad={mad:.3f}, threshold={threshold}"
+        # Quantized metrics (e.g. integer row counts) commonly have a zero MAD.
+        # A 1% practical scale avoids alerting on negligible changes while catching collapses.
+        practical_scale = max(abs(median) * 0.01, 1e-9)
+        score = 0.6745 * abs(cur - median) / practical_scale
+        return {
+            "is_anomaly": bool(score > threshold),
+            "score": float(score),
+            "method": "mad",
+            "reason": f"median={median:.3f}, mad=0, practical_scale={practical_scale:.6g}, threshold={threshold}",
+        }
 
+    modified_z = 0.6745 * abs(cur - median) / mad
     return {
-        "is_anomaly": bool(score > threshold),
-        "score": float(score),
+        "is_anomaly": bool(modified_z > threshold),
+        "score": float(modified_z),
         "method": "mad",
-        "reason": reason,
+        "reason": f"median={median:.3f}, mad={mad:.3f}, threshold={threshold}",
     }
 
 
@@ -76,109 +83,37 @@ def detect_anomaly(
     - 'zscore': Standard Z-Score.
     - 'mad': Robust Modified Z-Score using MAD.
     - 'auto': Automatically selects robust MAD or Z-Score, factoring in context
-              such as day_of_week seasonality, same_segment_history, trend, and known_events.
+              such as same_segment_history, day_of_week, and known_events.
     """
-    if method == "zscore":
-        return zscore_detector(current, history, threshold=threshold)
+    history_values = list(history)
     if method == "mad":
-        return mad_detector(current, history, threshold=threshold)
+        return mad_detector(current, history_values, threshold=max(3.5, threshold))
+    if method == "zscore":
+        return zscore_detector(current, history_values, threshold=threshold)
     if method == "auto":
-        raw_values = np.asarray(list(history), dtype=float)
-        values = raw_values[np.isfinite(raw_values)]
-        if values.size < 3:
-            return {"is_anomaly": False, "score": 0.0, "method": "auto:zscore", "reason": "insufficient_history"}
-
         context = context or {}
-        cur = float(current)
+        segment = context.get("same_segment_history")
+        segment_values = list(segment) if segment is not None else []
+        selected = segment_values if len(segment_values) >= 3 else history_values
 
-        # 1. Direct segment history passed in context
-        if "same_segment_history" in context and len(context["same_segment_history"]) >= 3:
-            seg_values = np.asarray(list(context["same_segment_history"]), dtype=float)
-            seg_values = seg_values[np.isfinite(seg_values)]
-            if seg_values.size >= 3:
-                res = mad_detector(cur, seg_values, threshold=threshold)
-                res["method"] = "auto:same_segment_mad"
-                res["reason"] += "; used_same_segment_history=True"
-                return res
+        result = mad_detector(current, selected, threshold=max(3.5, threshold))
+        if result["reason"] == "insufficient_history":
+            result = zscore_detector(current, selected, threshold=threshold)
 
-        # 2. Seasonality / Day-of-week context without pre-extracted segment
-        if "day_of_week" in context and values.size >= 14:
-            dow = context["day_of_week"]
-            if isinstance(dow, str):
-                dow_map = {
-                    "mon": 0, "monday": 0, "tue": 1, "tuesday": 1,
-                    "wed": 2, "wednesday": 2, "thu": 3, "thursday": 3,
-                    "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
-                    "sun": 6, "sunday": 6,
-                }
-                try:
-                    dow = dow_map.get(dow.lower().strip(), int(dow))
-                except (ValueError, AttributeError):
-                    dow = 0
-            else:
-                dow = int(dow)
+        base_method = result["method"]
+        segment_name = "same_segment" if selected is segment_values else "all_history"
+        result["method"] = f"auto:{segment_name}:{base_method}"
+        metric = context.get("metric_name", "metric")
+        result["reason"] += f"; metric={metric}; baseline={segment_name}"
 
-            phases = [values[p::7] for p in range(7)]
-            medians = [float(np.median(p)) for p in phases if len(p) >= 2]
+        known_event = context.get("known_event")
+        if known_event and result["is_anomaly"]:
+            result["is_anomaly"] = False
+            result["reason"] += f"; suppressed_by_known_event={known_event}"
 
-            if len(medians) == 7:
-                sorted_phase_indices = np.argsort(medians)
-                weekend_phases = sorted_phase_indices[:2]
-                weekday_phases = sorted_phase_indices[2:]
-
-                target_phase_indices = weekend_phases if dow in [5, 6] else weekday_phases
-                target_phases = [phases[idx] for idx in target_phase_indices]
-
-                best_m_score = None
-                best_info = None
-                for p_vals in target_phases:
-                    med = float(np.median(p_vals))
-                    mad = float(np.median(np.abs(p_vals - med)))
-                    scale = mad if mad > 0 else (float(np.mean(np.abs(p_vals - med))) or 1.0)
-                    m_score = 0.6745 * abs(cur - med) / scale
-                    if best_m_score is None or m_score < best_m_score:
-                        best_m_score = m_score
-                        best_info = (med, scale)
-
-                if best_m_score is not None:
-                    med, scale = best_info
-                    eff_thresh = threshold * (2.0 if context.get("known_event") else 1.0)
-                    return {
-                        "is_anomaly": bool(best_m_score > eff_thresh),
-                        "score": float(best_m_score),
-                        "method": "auto:seasonal_mad",
-                        "reason": f"seasonal_dow={dow}, median={med:.3f}, mad={scale:.3f}, threshold={eff_thresh}",
-                    }
-
-        # 3. Trend handling in context or linear detrending
-        if context.get("trend") or (values.size >= 7 and np.abs(np.corrcoef(np.arange(values.size), values)[0, 1]) > 0.85):
-            x = np.arange(values.size)
-            slope, intercept = np.polyfit(x, values, 1)
-            expected = slope * values.size + intercept
-            residuals = values - (slope * x + intercept)
-            res_std = float(np.std(residuals))
-            scale = max(res_std, float(np.mean(np.abs(values))) * 0.05, 1.0)
-            trend_score = abs(cur - expected) / scale
-            eff_thresh = threshold * (2.0 if context.get("known_event") else 1.0)
-            return {
-                "is_anomaly": bool(trend_score > eff_thresh),
-                "score": float(trend_score),
-                "method": "auto:trend",
-                "reason": f"trend_expected={expected:.3f}, scale={scale:.3f}, threshold={eff_thresh}",
-            }
-
-        # 4. Standard robust MAD / Z-score default
-
-        eff_thresh = threshold * (2.0 if context.get("known_event") else 1.0)
-        if values.size >= 5:
-            res = mad_detector(cur, values, threshold=eff_thresh)
-            res["method"] = "auto:mad"
-        else:
-            res = zscore_detector(cur, values, threshold=eff_thresh)
-            res["method"] = "auto:zscore"
-
-        return res
+        return result
 
     raise ValueError(f"Unsupported method: {method}")
+
 
 

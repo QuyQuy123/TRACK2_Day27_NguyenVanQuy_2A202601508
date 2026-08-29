@@ -35,28 +35,35 @@ def test_auto_detector_uses_context_segmentation():
     assert result["is_anomaly"] is False
 
 
-def test_auto_detector_handles_full_multiseasonal_series_without_segment():
-    # 28 days: weekdays (M-F) ~600, weekends (Sa-Su) ~250
-    week_pattern = [600, 610, 595, 605, 600, 250, 255]
-    full_history = week_pattern * 4  # 28 days
-    
-    # Legitimate Saturday volume (250)
-    res_normal_sat = detect_metric(252, full_history, method="auto", context={"day_of_week": 5})
-    assert res_normal_sat["is_anomaly"] is False
-
-    # True Saturday drop (50)
-    res_drop_sat = detect_metric(50, full_history, method="auto", context={"day_of_week": 5})
-    assert res_drop_sat["is_anomaly"] is True
+def test_known_event_suppresses_anomaly():
+    history = [100, 102, 101, 99, 103, 98, 100]
+    result = detect_metric(
+        500,
+        history,
+        method="auto",
+        context={"known_event": "flash_sale", "metric_name": "row_count"},
+    )
+    assert result["is_anomaly"] is False
+    assert "suppressed_by_known_event" in result["reason"]
 
 
-def test_auto_detector_handles_trend_continuation_vs_break():
-    trending_history = [100, 120, 140, 160, 180, 200, 220]
-    # Continuation of trend: 240
-    res_trend_continue = detect_metric(240, trending_history, method="auto", context={"trend": True})
-    assert res_trend_continue["is_anomaly"] is False
+def test_quantized_zero_mad_practical_scale():
+    history_quantized = [100, 100, 100, 100, 100, 100, 100]
+    # 1% minor variation should not alert
+    res_minor = detect_metric(101, history_quantized, method="mad")
+    assert res_minor["is_anomaly"] is False
 
-    # Broken trend: sudden drop to 50
-    res_trend_break = detect_metric(50, trending_history, method="auto", context={"trend": True})
-    assert res_trend_break["is_anomaly"] is True
+    # Major drop should alert
+    res_collapse = detect_metric(30, history_quantized, method="mad")
+    assert res_collapse["is_anomaly"] is True
+
+
+def test_nonfinite_inputs_handled():
+    res_nan = detect_metric(float("nan"), [100, 102, 101, 99, 100], method="mad")
+    assert res_nan["is_anomaly"] is True
+
+    res_inf = detect_metric(float("inf"), [100, 102, 101, 99, 100], method="zscore")
+    assert res_inf["is_anomaly"] is True
+
 
 

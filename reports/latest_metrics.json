@@ -1,23 +1,23 @@
 {
-  "timestamp": "2026-08-29T09:21:43.531772+00:00",
+  "timestamp": "2026-08-29T09:31:48.398123+00:00",
   "orders_rows": 600,
   "failed_contract_checks": 0,
   "critical_contract_failures": 0,
   "row_count_anomaly": {
     "is_anomaly": true,
     "score": 18.751099999999997,
-    "method": "auto:mad",
-    "reason": "median=252.500, mad=12.500, threshold=3.0"
+    "method": "auto:all_history:mad",
+    "reason": "median=252.500, mad=12.500, threshold=3.5; metric=row_count; baseline=all_history"
   },
-  "freshness_minutes": 5.025423033333333,
+  "freshness_minutes": 5.023167483333333,
   "kb_docs_count": 5,
   "kb_failed_checks": 0,
-  "kb_freshness_minutes": 10.008617433333335,
+  "kb_freshness_minutes": 10.008678166666666,
   "kb_text_length_signal": {
     "is_anomaly": false,
-    "score": 0.7547940916996035,
-    "method": "zscore",
-    "reason": "mean=14.834, std=1.015, threshold=3.0",
+    "score": 0.8974279661016953,
+    "method": "auto:all_history:mad",
+    "reason": "median=14.815, mad=0.590, threshold=3.5; metric=metric; baseline=all_history",
     "metric": "mean_text_length",
     "current_mean": 15.6
   },
