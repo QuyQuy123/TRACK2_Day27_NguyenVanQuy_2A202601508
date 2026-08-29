@@ -46,17 +46,28 @@ def main() -> None:
     ).total_seconds() / 60.0
 
     docs = load_jsonl(ROOT / "data" / "incoming" / "kb_documents.jsonl")
+    kb_df = pd.DataFrame(docs)
+    kb_contract = load_contract(ROOT / "contracts" / "kb_contract.yaml")
+    kb_issues = validate_dataframe(kb_df, kb_contract)
+    kb_failed = failed_issues(kb_issues)
+
     text_result = detect_text_length_shift(
         [d["content"] for d in docs], history["mean_text_length"].tail(14).tolist()
     )
 
+    kb_published = pd.to_datetime(kb_df["published_at"], utc=True, errors="coerce")
+    kb_freshness_minutes = (
+        pd.Timestamp(datetime.now(timezone.utc)) - kb_published.max()
+    ).total_seconds() / 60.0
+
     # Demo SLO: one check event for this run.
-    bad = 1 if critical_failed else 0
+    bad = 1 if (critical_failed or any(i.get("severity") == "critical" for i in kb_failed)) else 0
     contract_slo = calculate_slo(0.999, bad_events=bad, total_events=1)
 
     with open(ROOT / "data" / "baseline" / "lineage_graph.json", "r", encoding="utf-8") as f:
         lineage = json.load(f)["dataset_lineage"]
     blast_radius = get_downstream_assets(lineage, "stg_orders")
+    kb_blast_radius = get_downstream_assets(lineage, "kb_documents")
 
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -65,22 +76,31 @@ def main() -> None:
         "critical_contract_failures": len(critical_failed),
         "row_count_anomaly": row_result,
         "freshness_minutes": freshness_minutes,
+        "kb_docs_count": len(docs),
+        "kb_failed_checks": len(kb_failed),
+        "kb_freshness_minutes": kb_freshness_minutes,
         "kb_text_length_signal": text_result,
         "contract_slo": contract_slo,
         "sample_blast_radius_from_stg_orders": blast_radius,
+        "sample_blast_radius_from_kb_documents": kb_blast_radius,
     }
     out = ROOT / "reports" / "latest_metrics.json"
     out.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
     print("=== DATA RELIABILITY BASELINE ===")
     print(f"orders rows              : {len(orders)}")
-    print(f"contract failed checks   : {len(failed)}")
-    print(f"critical contract fails  : {len(critical_failed)}")
+    print(f"orders failed checks     : {len(failed)}")
+    print(f"orders critical fails    : {len(critical_failed)}")
     print(f"row-count anomaly        : {row_result['is_anomaly']} ({row_result['method']}, score={row_result['score']:.2f})")
-    print(f"freshness minutes        : {freshness_minutes:.1f}")
+    print(f"orders freshness (min)   : {freshness_minutes:.1f}")
+    print(f"KB docs count            : {len(docs)}")
+    print(f"KB contract failed       : {len(kb_failed)}")
+    print(f"KB freshness (min)       : {kb_freshness_minutes:.1f}")
     print(f"KB length anomaly        : {text_result['is_anomaly']}")
-    print(f"sample blast radius      : {', '.join(blast_radius)}")
-    print(f"report                    : {out.relative_to(ROOT)}")
+    print(f"orders blast radius      : {', '.join(blast_radius)}")
+    print(f"KB blast radius          : {', '.join(kb_blast_radius)}")
+    print(f"report                   : {out.relative_to(ROOT)}")
+
 
 
 if __name__ == "__main__":

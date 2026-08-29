@@ -8,3 +8,7 @@ dbt_project/logs/
 dbt_project/dbt_packages/
 .streamlit/
 .DS_Store
+
+# Harness core maintenance binary
+scripts/bin/harness
+scripts/bin/harness.exe
